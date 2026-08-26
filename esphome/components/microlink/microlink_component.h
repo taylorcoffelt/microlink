@@ -18,17 +18,23 @@ class MicroLinkComponent : public Component {
   void set_max_peers(uint8_t max_peers) { this->max_peers_ = max_peers; }
 
   void setup() override;
+  void loop() override;
   void dump_config() override;
 
-  // AFTER_WIFI (200.0): WiFi is up, the API has not connected yet.
+  // AFTER_WIFI (200.0) orders us after the WiFi component's setup, which is not
+  // the same thing as having a network. The real start is gated in loop().
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   microlink_t *handle() const { return this->ml_; }
+  bool started() const { return this->started_; }
 
  protected:
+  void start_();
+
   const char *auth_key_{nullptr};
   const char *device_name_{nullptr};
   uint8_t max_peers_{8};
+  bool started_{false};
   microlink_t *ml_{nullptr};
 };
 

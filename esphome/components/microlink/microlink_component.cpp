@@ -3,6 +3,7 @@
 #ifdef USE_ESP32
 
 #include "esphome/core/log.h"
+#include "esphome/components/network/util.h"
 
 namespace esphome {
 namespace microlink {
@@ -10,6 +11,21 @@ namespace microlink {
 static const char *const TAG = "microlink";
 
 void MicroLinkComponent::setup() {
+  // Nothing to do yet. Starting here would have MicroLink resolving
+  // controlplane.tailscale.com before the device has associated with anything,
+  // producing a DNS error every couple of seconds for as long as WiFi is down.
+  ESP_LOGD(TAG, "Waiting for a network before starting the tunnel");
+}
+
+void MicroLinkComponent::loop() {
+  if (this->started_ || this->is_failed())
+    return;
+  if (!network::is_connected())
+    return;
+  this->start_();
+}
+
+void MicroLinkComponent::start_() {
   microlink_config_t cfg = {};
   cfg.auth_key = this->auth_key_;
   cfg.device_name = this->device_name_;
@@ -26,8 +42,8 @@ void MicroLinkComponent::setup() {
   }
 
   // Returns immediately. MicroLink's own FreeRTOS tasks drive the protocol, so
-  // setup() never blocks and the ESPHome loop is never starved -- no watchdog
-  // feeding required. Expect roughly 15-20s from here to a usable tunnel.
+  // this never blocks the ESPHome loop and needs no watchdog feeding. Expect
+  // roughly 15-20s from here to a usable tunnel.
   const esp_err_t err = microlink_start(this->ml_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "microlink_start() failed: %s", esp_err_to_name(err));
@@ -35,7 +51,8 @@ void MicroLinkComponent::setup() {
     return;
   }
 
-  ESP_LOGI(TAG, "MicroLink started; tunnel will come up in the background");
+  this->started_ = true;
+  ESP_LOGI(TAG, "Network is up; MicroLink started");
 }
 
 void MicroLinkComponent::dump_config() {
@@ -43,9 +60,9 @@ void MicroLinkComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Device name: %s",
                 this->device_name_ != nullptr ? this->device_name_ : "(auto from MAC)");
   ESP_LOGCONFIG(TAG, "  Max peers: %u", this->max_peers_);
-  if (this->is_failed()) {
+  ESP_LOGCONFIG(TAG, "  Started: %s", YESNO(this->started_));
+  if (this->is_failed())
     ESP_LOGE(TAG, "  Setup failed");
-  }
 }
 
 }  // namespace microlink
