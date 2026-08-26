@@ -37,7 +37,9 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
-    cv.only_with_esp_idf,
+    # NB: cv.only_with_esp_idf no longer exists in current ESPHome - only the
+    # only_with_arduino preset survives alongside the generic form below.
+    cv.only_with_framework("esp-idf"),
 )
 
 
