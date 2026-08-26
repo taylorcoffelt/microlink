@@ -4,15 +4,18 @@ Link-test cut. This brings the tunnel up and does nothing else. Its purpose is
 to answer one question: can MicroLink's bundled wireguard_lwip and ESPHome's
 noise-c (pulled in by `api:` encryption) coexist in a single image? Diagnostics,
 rebind-on-reconnect and priority peer come after that answer is yes.
+
+Requires `network: enable_ipv6: true` - see the final validator below.
 """
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.components import esp32
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@taylorcoffelt"]
-DEPENDENCIES = ["esp32", "wifi"]
+DEPENDENCIES = ["esp32", "wifi", "network"]
 
 CONF_AUTH_KEY = "auth_key"
 CONF_DEVICE_NAME = "device_name"
@@ -43,6 +46,37 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+def _validate_ipv6_enabled(config):
+    """MicroLink is written against a dual-stack lwIP.
+
+    ESP-IDF builds with LWIP_IPV6=1 by default; ESPHome does not - its network
+    component defaults enable_ipv6 to False on esp32. With IPv6 off, lwIP
+    collapses ip_addr_t to `struct ip4_addr` (so `.u_addr.ip4` does not exist),
+    leaves `struct sockaddr_in6` an incomplete type, and #defines AF_INET6 to
+    AF_UNSPEC. ml_wg_mgr.c, ml_stun.c and ml_net_io.c all fail to compile, with
+    errors that point at lwIP headers rather than at the actual cause.
+
+    Catch it here, where the message can be useful.
+    """
+    full = fv.full_config.get()
+    network_config = full.get("network") or {}
+    if not network_config.get("enable_ipv6", False):
+        raise cv.Invalid(
+            "The 'microlink' component requires lwIP IPv6, which ESPHome "
+            "leaves off by default on ESP32. Add this to your configuration:\n\n"
+            "network:\n"
+            "  enable_ipv6: true\n\n"
+            "MicroLink uses IPv6 for STUN and endpoint discovery. Beyond making "
+            "it compile, an IPv6 endpoint frequently sidesteps NAT altogether, "
+            "which is the difference between a direct WireGuard path and a DERP "
+            "relay on carrier networks."
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _validate_ipv6_enabled
+
+
 async def to_code(config):
     # Two registrations, not one. Upstream keeps wireguard_lwip at
     # components/microlink/components/wireguard_lwip and symlinks it to the top
@@ -61,7 +95,6 @@ async def to_code(config):
         path="components/microlink/components/wireguard_lwip",
     )
 
-    # Needed the moment the tunnel actually runs; inert for a link test.
     # TLS to the control plane and DERP:
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
     esp32.add_idf_sdkconfig_option(
@@ -70,9 +103,12 @@ async def to_code(config):
     # MapResponse payloads exceed one MTU:
     esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IP4_FRAG", True)
     esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IP4_REASSEMBLY", True)
-    # MicroLink's H2/JSON buffers are PSRAM-backed (512KB each by default):
+    # MicroLink's H2/JSON buffers are PSRAM-backed (512KB each by default).
+    # NB: CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY was renamed in IDF 5.5 to
+    # CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM; IDF still maps the old name,
+    # but set the current one.
     esp32.add_idf_sdkconfig_option(
-        "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY", True
+        "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM", True
     )
 
     var = cg.new_Pvariable(config[CONF_ID])
