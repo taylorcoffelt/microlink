@@ -25,41 +25,25 @@ bool M5PM1Component::write_pin_(uint8_t pin, bool level) {
   return this->update_bits_(M5PM1_REG_GPIO_OUT, bit, level ? bit : 0);
 }
 
-// The speaker amplifier is an AW8737, and it is NOT a pin you hold high.
+// The speaker amplifier is an AW8737A on PYG3, and its enable is a plain held
+// level - not a pulse train, despite the PMIC offering a pulse macro at 0x53.
 //
-// It is a 1-wire gain-controlled part: a burst of pulses on its enable line
-// selects the gain mode and brings the amplifier up, and leaving the line at a
-// static level leaves it shut down. Driving PYG3 as a plain output was enough
-// to make the output stage twitch audibly whenever it switched - a single
-// click - while never actually enabling the amplifier. The symptom is
-// "the speaker moves but plays nothing", which is easy to misread as a codec
-// or clocking fault.
+// From the AW8737A datasheet: a rising edge on SHDN enters Mode 1, and N
+// rising edges within the timing window select Mode N (max 4). But modes 1-4
+// all share the SAME voltage gain - 16.3 V/V at Rin=3k - and differ only in
+// the boost converter's output power ceiling (1.2W down to 0.6W). There is no
+// mode that is "on but inaudible", so selecting one buys nothing here.
 //
-// The M5PM1 generates the sequence in hardware from register 0x53: 0xA3 is
-// "refresh + 1 pulse + GPIO3". The PMIC emits the pulse train and then holds
-// G3 high on its own, which is why G3 must not simultaneously be claimed as a
-// manual output in GPIO_MODE - the two would fight over the same pin.
+// What does matter: SHDN must stay high. Pull it low for around 1ms and the
+// amplifier shuts down. A pulse macro that returns the pin to its resting
+// state is therefore an excellent way to turn the amplifier off again by
+// accident.
+//
+// M5Unified's own StickS3 support does exactly what this does and nothing
+// more: configure PM1 GPIO3 as a push-pull output once, then set or clear
+// register 0x11 bit 3.
 bool M5PM1Component::apply_speaker_amp_(bool on) {
-  const uint8_t amp_bit = 1 << M5PM1_PIN_SPEAKER_AMP;
-
-  if (on) {
-    // Hand G3's direction back to the pulse generator, then fire it.
-    if (!this->update_bits_(M5PM1_REG_GPIO_MODE, amp_bit, 0x00)) {
-      ESP_LOGW(TAG, "Could not release PYG3 to the pulse generator");
-      return false;
-    }
-    if (!this->write_byte(M5PM1_REG_PULSE, M5PM1_PULSE_AMP_WAKE)) {
-      ESP_LOGW(TAG, "AW8737 wake pulse failed");
-      return false;
-    }
-    ESP_LOGD(TAG, "AW8737 wake pulse sent (0x53 = 0x%02X)", M5PM1_PULSE_AMP_WAKE);
-    return true;
-  }
-
-  // Shutting down means taking manual control back and holding the line low.
-  if (!this->update_bits_(M5PM1_REG_GPIO_MODE, amp_bit, amp_bit))
-    return false;
-  return this->write_pin_(M5PM1_PIN_SPEAKER_AMP, false);
+  return this->write_pin_(M5PM1_PIN_SPEAKER_AMP, on);
 }
 
 void M5PM1Component::set_speaker_amp(bool on) {
@@ -116,15 +100,13 @@ void M5PM1Component::setup() {
   const uint8_t amp_bit = 1 << M5PM1_PIN_SPEAKER_AMP;
   const uint8_t both = lcd_bit | amp_bit;
 
-  // The 5V boost first, before anything downstream of it is switched on. The
-  // AW8737 runs from this rail, so without it the amplifier has no supply no
-  // matter what its enable line is doing - and this register was simply never
-  // written. Written as a whole byte rather than read-modify-write because
-  // that is what M5Stack's own bring-up sequence does.
+  // PWR_CFG: [4] LED_EN, [3] BOOST_EN, [2] LDO_EN, [1] DCDC_EN, [0] CHG_EN.
+  // Only the low four - deliberately leaving LED_EN alone, since lighting an
+  // LED on a battery device is not something this component should decide.
   //
-  // This doubles as the presence check: if the PMIC does not answer here, the
-  // LCD rail is never coming up and the panel stays dark.
-  if (!this->write_byte(M5PM1_REG_PWR_OUT_EN, M5PM1_PWR_OUT_ALL)) {
+  // Doubles as the presence check: if the PMIC does not answer, the LCD rail is
+  // never coming up and the panel stays dark.
+  if (!this->update_bits_(M5PM1_REG_PWR_OUT_EN, 0x0F, 0x0F)) {
     ESP_LOGE(TAG, "No response at 0x%02X - LCD rail will stay off", this->address_);
     this->mark_failed();
     return;
@@ -137,23 +119,17 @@ void M5PM1Component::setup() {
   // 00 = plain GPIO rather than IRQ/WAKE/PWM.
   this->update_bits_(M5PM1_REG_GPIO_FUNC0, 0xF0, 0x00);
 
-  // Push-pull on both. G3 in particular has to be able to drive rather than
-  // float, or the 0x53 pulse generator has nothing to pull against.
+  // Push-pull, both pins.
   this->update_bits_(M5PM1_REG_GPIO_DRV, both, 0x00);
 
-  // Only G2 is a manual output. G3's direction belongs to the pulse generator
-  // - see apply_speaker_amp_().
-  this->update_bits_(M5PM1_REG_GPIO_MODE, both, lcd_bit);
+  // Both are plain manual outputs. G3's enable is a held level, so nothing
+  // else may own its direction.
+  this->update_bits_(M5PM1_REG_GPIO_MODE, both, both);
 
   this->write_pin_(M5PM1_PIN_LCD_RAIL, this->lcd_power_);
+  this->write_pin_(M5PM1_PIN_SPEAKER_AMP, this->speaker_amp_);
 
-  // Let the 5V and 3.3V rails settle before anything tries to wake the
-  // amplifier off them.
-  delay(100);  // NOLINT(clang-analyzer-security.*)
-
-  this->apply_speaker_amp_(this->speaker_amp_);
-
-  ESP_LOGI(TAG, "5V boost on, L3B rail %s (PYG2), speaker amp %s (PYG3, pulse-driven)",
+  ESP_LOGI(TAG, "Rails up, L3B %s (PYG2), speaker amp %s (PYG3)",
            this->lcd_power_ ? "ON" : "off", this->speaker_amp_ ? "ON" : "off");
 }
 
@@ -183,7 +159,7 @@ void M5PM1Component::dump_config() {
   ESP_LOGCONFIG(TAG, "M5PM1 PMIC:");
   LOG_I2C_DEVICE(this);
   ESP_LOGCONFIG(TAG, "  LCD rail (L3B/PYG2): %s", ONOFF(this->lcd_power_));
-  ESP_LOGCONFIG(TAG, "  Speaker amp (PYG3): %s (AW8737, pulse-driven via 0x53)",
+  ESP_LOGCONFIG(TAG, "  Speaker amp (PYG3): %s (AW8737A, held level)",
                 ONOFF(this->speaker_amp_));
   if (this->is_failed())
     ESP_LOGE(TAG, "  Communication failed - the panel will be dark");
