@@ -14,11 +14,20 @@ void MicroLinkComponent::setup() {
   // Nothing to do yet. Starting here would have MicroLink resolving
   // controlplane.tailscale.com before the device has associated with anything,
   // producing a DNS error every couple of seconds for as long as WiFi is down.
-  ESP_LOGD(TAG, "Waiting for a network before starting the tunnel");
+  if (this->auto_start_) {
+    ESP_LOGD(TAG, "Waiting for a network before starting the tunnel");
+  } else {
+    ESP_LOGD(TAG, "auto_start is off; idle until start() is called");
+  }
 }
 
 void MicroLinkComponent::loop() {
   if (this->started_ || this->is_failed())
+    return;
+  // Either we start ourselves, or something asked us to. want_start_ is checked
+  // here rather than acted on in start() so that a request made before the
+  // device has an address is honoured as soon as it gets one.
+  if (!this->auto_start_ && !this->want_start_)
     return;
   if (!network::is_connected())
     return;
@@ -60,6 +69,7 @@ void MicroLinkComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Device name: %s",
                 this->device_name_ != nullptr ? this->device_name_ : "(auto from MAC)");
   ESP_LOGCONFIG(TAG, "  Max peers: %u", this->max_peers_);
+  ESP_LOGCONFIG(TAG, "  Auto start: %s", YESNO(this->auto_start_));
   ESP_LOGCONFIG(TAG, "  Started: %s", YESNO(this->started_));
   if (this->is_failed())
     ESP_LOGE(TAG, "  Setup failed");
