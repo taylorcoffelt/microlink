@@ -28,6 +28,18 @@ class MicroLinkComponent : public Component {
   microlink_t *handle() const { return this->ml_; }
   bool started() const { return this->started_; }
 
+  // Erase the node keys cached in NVS so the next boot registers from scratch.
+  //
+  // Needed when the control plane answers "node not found": the cached machine
+  // key refers to a node the tailnet no longer has - a one-shot auth key that
+  // was already consumed, or a node deleted from the admin console. MicroLink
+  // will otherwise re-present the stale key forever, cycling between
+  // registering and reconnecting.
+  //
+  // microlink_factory_reset() only takes effect before microlink_init(), so
+  // call this and then reboot.
+  void reset_keys() { microlink_factory_reset(); }
+
  protected:
   void start_();
 
