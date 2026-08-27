@@ -15,6 +15,7 @@ DEPENDENCIES = ["esp32", "wifi", "network"]
 CONF_AUTH_KEY = "auth_key"
 CONF_DEVICE_NAME = "device_name"
 CONF_MAX_PEERS = "max_peers"
+CONF_AUTO_START = "auto_start"
 
 microlink_ns = cg.esphome_ns.namespace("microlink")
 MicroLinkComponent = microlink_ns.class_("MicroLinkComponent", cg.Component)
@@ -32,6 +33,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_AUTH_KEY): cv.string_strict,
             cv.Optional(CONF_DEVICE_NAME): cv.string_strict,
             cv.Optional(CONF_MAX_PEERS, default=8): cv.int_range(min=1, max=64),
+            # False leaves the tunnel down until an automation calls start().
+            # Useful when the device is normally on a network that already
+            # reaches everything it needs, and the tailnet is only for roaming:
+            # control-plane TLS, DERP, STUN and WireGuard keepalives all cost
+            # CPU and radio time whether or not anything uses the path.
+            cv.Optional(CONF_AUTO_START, default=True): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
@@ -42,6 +49,9 @@ CONFIG_SCHEMA = cv.All(
     # include it. Left alone, ESPHome counts only its own components.
     #   TCP: control-plane TLS (HTTP/2), DERP relay TLS
     #   UDP: magicsock (WireGuard + DISCO share one), STUN v4, STUN v6
+    #
+    # Declared even when auto_start is false: the budget has to cover the case
+    # where the tunnel does come up later.
     socket.consume_sockets(2, "microlink", socket.SocketType.TCP),
     socket.consume_sockets(3, "microlink", socket.SocketType.UDP),
 )
@@ -146,3 +156,4 @@ async def to_code(config):
     if CONF_DEVICE_NAME in config:
         cg.add(var.set_device_name(config[CONF_DEVICE_NAME]))
     cg.add(var.set_max_peers(config[CONF_MAX_PEERS]))
+    cg.add(var.set_auto_start(config[CONF_AUTO_START]))
