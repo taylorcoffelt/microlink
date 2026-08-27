@@ -1,12 +1,5 @@
 """ESPHome wrapper for MicroLink - a Tailscale client for the ESP32.
 
-Link-test cut. This brings the tunnel up and does nothing else. Its purpose was
-to answer one question: can MicroLink's bundled wireguard_lwip and ESPHome's
-noise-c (pulled in by `api:` encryption) coexist in a single image?
-
-They can. The image links with the poly1305 rename applied - see
-components/microlink/components/wireguard_lwip/CMakeLists.txt.
-
 Requires `network: enable_ipv6: true` - see the final validator below.
 """
 
@@ -46,8 +39,7 @@ CONFIG_SCHEMA = cv.All(
     # only_with_arduino preset survives alongside the generic form below.
     cv.only_with_framework("esp-idf"),
     # Declare what MicroLink opens so ESPHome sizes CONFIG_LWIP_MAX_SOCKETS to
-    # include it. Left alone, ESPHome counts only its own components (12 on a
-    # config like this one) and MicroLink's sockets come out of nowhere.
+    # include it. Left alone, ESPHome counts only its own components.
     #   TCP: control-plane TLS (HTTP/2), DERP relay TLS
     #   UDP: magicsock (WireGuard + DISCO share one), STUN v4, STUN v6
     socket.consume_sockets(2, "microlink", socket.SocketType.TCP),
@@ -62,10 +54,7 @@ def _validate_ipv6_enabled(config):
     component defaults enable_ipv6 to False on esp32. With IPv6 off, lwIP
     collapses ip_addr_t to `struct ip4_addr` (so `.u_addr.ip4` does not exist),
     leaves `struct sockaddr_in6` an incomplete type, and #defines AF_INET6 to
-    AF_UNSPEC. ml_wg_mgr.c, ml_stun.c and ml_net_io.c all fail to compile, with
-    errors that point at lwIP headers rather than at the actual cause.
-
-    Catch it here, where the message can be useful.
+    AF_UNSPEC. ml_wg_mgr.c, ml_stun.c and ml_net_io.c all fail to compile.
     """
     full = fv.full_config.get()
     network_config = full.get("network") or {}
@@ -106,8 +95,7 @@ async def to_code(config):
 
     # ml_noise.c uses mbedTLS for the Noise transport cipher. ESP-IDF defaults
     # all three of these to n - standard TLS gets by on AES-GCM - and
-    # CHACHAPOLY depends on the other two. MicroLink's standalone examples set
-    # them in sdkconfig.defaults; consumed as a component it cannot, so we do.
+    # CHACHAPOLY depends on the other two.
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CHACHA20_C", True)
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_POLY1305_C", True)
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CHACHAPOLY_C", True)
@@ -130,17 +118,26 @@ async def to_code(config):
     esp32.add_idf_sdkconfig_option("CONFIG_LWIP_TCPIP_RECVMBOX_SIZE", 64)
 
     # MicroLink's H2/JSON buffers are PSRAM-backed (512KB each by default).
-    # NB: CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY was renamed in IDF 5.5 to
-    # CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM.
     esp32.add_idf_sdkconfig_option(
         "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM", True
     )
 
-    # Deliberately NOT setting CONFIG_ESP_TASK_WDT_TIMEOUT_S to 30 as the
-    # upstream examples do. MicroLink runs its protocol in its own FreeRTOS
-    # tasks and never stalls the ESPHome loop, so ESPHome's default is right -
-    # and a real hang should still show up as a watchdog reset rather than be
-    # papered over.
+    # Watchdog headroom, matching what every upstream MicroLink example ships
+    # ("Watchdog (extended for TLS handshakes)").
+    #
+    # I previously left this at ESPHome's 5s default, reasoning that MicroLink
+    # runs in its own FreeRTOS tasks and never stalls the ESPHome loop, so a
+    # genuine hang ought to surface. That was the wrong analysis: the task
+    # watchdog also watches the per-core IDLE tasks. ml_coord is pinned to core
+    # 1 at priority 5, ml_wg_mgr sits above it at priority 7 on the same core,
+    # and parse_peers_from_map_response() contains no yield of any kind - so a
+    # large MapResponse starves IDLE1 and panics, no matter how healthy the
+    # ESPHome loop is. hex_to_bytes() calling sscanf once per byte (64 calls per
+    # peer for the keys alone) makes that parse far slower than it looks.
+    #
+    # This buys the headroom back. The proper fix is to yield inside the peer
+    # loop and stop using sscanf as a hex parser, both in ml_coord.c.
+    esp32.add_idf_sdkconfig_option("CONFIG_ESP_TASK_WDT_TIMEOUT_S", 30)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
