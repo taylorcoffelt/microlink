@@ -8,6 +8,8 @@ init; nothing in ESPHome does. Without an equivalent here the panel has no
 power at all, and driving the GPIO38 backlight accomplishes nothing.
 
 PYG3 gates the speaker amplifier and is left off by default.
+
+Also exposes the PMIC's voltage ADCs - see sensor.py.
 """
 
 import esphome.codegen as cg
@@ -18,11 +20,14 @@ from esphome.const import CONF_ID
 DEPENDENCIES = ["i2c"]
 CODEOWNERS = ["@taylorcoffelt"]
 
+CONF_M5PM1_ID = "m5pm1_id"
 CONF_LCD_POWER = "lcd_power"
 CONF_SPEAKER_AMP = "speaker_amp"
 
 m5pm1_ns = cg.esphome_ns.namespace("m5pm1")
-M5PM1Component = m5pm1_ns.class_("M5PM1Component", cg.Component, i2c.I2CDevice)
+M5PM1Component = m5pm1_ns.class_(
+    "M5PM1Component", cg.PollingComponent, i2c.I2CDevice
+)
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -35,7 +40,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_SPEAKER_AMP, default=False): cv.boolean,
         }
     )
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.polling_component_schema("60s"))
     .extend(i2c.i2c_device_schema(0x6E))
 )
 
